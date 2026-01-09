@@ -1,55 +1,79 @@
+# app/services/ai_service.py
+import os
+from dotenv import load_dotenv
 from groq import Groq
-from sqlalchemy.orm import Session
-from app.core.config import settings
-from app.repositories.conversation_repository import ConversationRepository
+from app.repositories.conversation_repository import get_history, add_message
+from app.services.tools_service import consultar_pagamento_aluno
 
-# Cliente nativo da Groq
-client = Groq(api_key=settings.GROQ_API_KEY)
+load_dotenv()
+client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
 
-def get_groq_response(user_message: str, wa_id: str, name: str, db: Session) -> str:
-    """
-    Processa a mensagem, salva no histórico e retorna a resposta da IA.
-    """
-    # 1. Inicializa o repositório
-    repo = ConversationRepository(db)
+SYSTEM_PROMPT = """
+Você é assistente de academia que usa DADOS REAIS da Tool.
 
-    # 2. Salva a mensagem do usuário no banco (MEMÓRIA)
-    # Aqui salvamos ANTES de enviar, para garantir que se der erro na IA, sua pergunta ficou salva
-    repo.add_message(wa_id=wa_id, name=name, role="user", content=user_message)
+## REGRAS PAGAMENTOS (OBRIGATÓRIO):
+1. Quando receber [SISTEMA] SYSTEM_DATA: → COPIE OS DADOS EXATOS
+2. NUNCA invente valores, datas ou status
+3. Se Tool disser "Não encontrei" → informe isso
+4. Sempre mencione: valor, data e status da Tool
 
-    # 3. Busca o histórico recente (CONTEXTO)
-    # Pegamos as últimas 10 mensagens para ele ter um bom contexto
-    history = repo.get_history(wa_id=wa_id, limit=10)
+EXEMPLO CORRETO:
+[SISTEMA] SYSTEM_DATA: Último pagamento de Priscila Ingrid: - Data: 06/01/2026 - Valor: R$ 550.00
+→ "O último pagamento de Priscila Ingrid foi R$550 em 06/01/2026 (Aprovado)"
 
-    # 4. Define a Personalidade (System Prompt)
-    system_prompt = (
-        "Você é um assistente pessoal útil e direto chamado Jarvis. "
-        "Responda em português do Brasil. Seja conciso."
+SEMPRE priorize [SISTEMA] sobre qualquer conhecimento anterior.
+"""
+
+
+
+def get_groq_response(message_body: str, profile_name: str, phone_number: str) -> str:
+    add_message(phone_number, "user", message_body, profile_name)
+
+    contexto_extra = ""
+    msg_lower = message_body.lower()
+
+
+    if any(palavra in msg_lower for palavra in ["pagamento", "mensalidade", "deve", "status financeiro"]):
+        print("🔍 [DEBUG] Gatilho de pagamento detectado!")
+
+        extract_prompt = f"""
+        Da frase: "{message_body}"
+        Extraia APENAS o nome da pessoa mencionada (ex: "Adriana Silva", "João").
+        Se não tiver nome claro, responda "NOME_NAO_IDENTIFICADO".
+        Responda com APENAS o nome, sem explicação.
+        """
+
+        extract_comp = client.chat.completions.create(
+            messages=[{"role": "user", "content": extract_prompt}],
+            model="llama-3.3-70b-versatile",
+            temperature=0
+        )
+        nome = extract_comp.choices[0].message.content.strip()
+        print(f"🔍 [DEBUG] Nome extraído: '{nome}'")
+
+        if nome and "NOME_NAO_IDENTIFICADO" not in nome:
+            print("🔍 [DEBUG] Chamando Tool...")
+            dados = consultar_pagamento_aluno(nome)
+            print(f"🔍 [DEBUG] Tool retornou: {dados[:100]}...")
+            contexto_extra = f"\n\n[SISTEMA] {dados}"
+        else:
+            print("🔍 [DEBUG] Nome não identificado.")
+
+    history = get_history(phone_number)
+    messages = [{"role": "system", "content": SYSTEM_PROMPT + contexto_extra}]
+
+    for msg in history:
+        role = "user" if msg.role == "user" else "assistant"
+        messages.append({"role": role, "content": msg.content})
+
+    messages.append({"role": "user", "content": message_body})
+
+    chat_completion = client.chat.completions.create(
+        messages=messages,
+        model="llama-3.3-70b-versatile",
+        temperature=0.7
     )
 
-    # 5. Monta a lista de mensagens para a Groq
-    messages_payload = [{"role": "system", "content": system_prompt}]
-
-    # Adiciona o histórico recuperado do banco
-    for msg in history:
-        messages_payload.append({"role": msg.role, "content": msg.content})
-
-    try:
-        # 6. Chama a IA
-        chat_completion = client.chat.completions.create(
-            messages=messages_payload,
-            model="llama-3.3-70b-versatile",
-            temperature=0.7,
-            max_tokens=300 # Aumentei um pouco para ele poder explicar código se precisar
-        )
-
-        ai_response = chat_completion.choices[0].message.content
-
-        # 7. Salva a resposta da IA no banco (MEMÓRIA)
-        repo.add_message(wa_id=wa_id, name=name, role="assistant", content=ai_response)
-
-        return ai_response
-
-    except Exception as e:
-        print(f"Erro na Groq: {e}")
-        return "Oss! Meu cérebro deu uma travada no tatame. Tente novamente."
+    ai_reply = chat_completion.choices[0].message.content
+    add_message(phone_number, "assistant", ai_reply, profile_name)
+    return ai_reply

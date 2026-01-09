@@ -6,6 +6,7 @@ class Settings(BaseSettings):
     TWILIO_AUTH_TOKEN: str
     TWILIO_PHONE_NUMBER: str
     DATABASE_URL: str
+    PERSONAL_DB_URL: str
 
     model_config = SettingsConfigDict(env_file=".env")
 

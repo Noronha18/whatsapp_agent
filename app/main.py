@@ -29,12 +29,10 @@ async def reply_whatsapp(
 
     # 1. Gera resposta (pode demorar alguns segundos)
     ai_reply = get_groq_response(
-        user_message=Body,
-        wa_id=From,
-        name=ProfileName,
-        db=db
+        message_body=Body,
+        profile_name=ProfileName,
+        phone_number=From  # 'From' é a variável que vem do Twilio (whatsapp:+55...)
     )
-
     # 2. Envio Ativo
     try:
         msg = twilio_client.messages.create(
