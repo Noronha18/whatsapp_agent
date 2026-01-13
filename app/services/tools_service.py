@@ -1,4 +1,5 @@
-# app/services/tools_service.py
+# ajutar a funcao lista alunos, ajustar a funcao consultar_pagamento_aluno
+
 import os
 from sqlalchemy import create_engine, text
 from dotenv import load_dotenv
@@ -8,9 +9,23 @@ DB_URL = os.getenv("PERSONAL_DB_URL")
 engine = create_engine(DB_URL)
 
 
-def consultar_pagamento_aluno(nome_aluno: str) -> str:
-    print(f"🥋 [TOOL] Buscando dados para: {nome_aluno}...")
+def lista_alunos() -> str:
+    try:
+        with engine.connect() as conn:
+            query = text("SELECT id, nome FROM alunos ORDER BY nome")
+            result = conn.execute(query).fetchall()
+            
+            if not result:
+                return "SYSTEM_DATA: Nenhum aluno encontrado."
+            
+            lista = "\n".join([f"- {row.nome} (ID: {row.id})" for row in result])
+            return f"SYSTEM_DATA: Lista de alunos:\n{lista}"
 
+    except Exception as e:
+        return f"SYSTEM_ERROR: {str(e)}"
+
+
+def consultar_pagamento_aluno(nome_aluno: str) -> str:
     try:
         with engine.connect() as conn:
             # Encontra aluno
@@ -45,3 +60,4 @@ def consultar_pagamento_aluno(nome_aluno: str) -> str:
 
     except Exception as e:
         return f"SYSTEM_ERROR: {str(e)}"
+
