@@ -11,3 +11,4 @@ wheels/
 .env
 .idea/
 *.pyc
+.pytest_cache/

@@ -1,47 +1,67 @@
-from fastapi import FastAPI, Form, Depends
+import logging
+from contextlib import asynccontextmanager
 from typing import Annotated
-from sqlalchemy.orm import Session
-from twilio.rest import Client 
 
-from app.core.database import get_db, Base, engine
-from app.services.ai_service import get_groq_response
+from fastapi import Depends, FastAPI, Form, Response
+from fastapi.concurrency import run_in_threadpool
+from twilio.rest import Client
+
 from app.core.config import settings
+from app.core.database import Base, engine
+from app.core.security import is_authorized, mask_number, verify_twilio_signature
+from app.services.ai_service import FALLBACK_REPLY, get_groq_response
 
-Base.metadata.create_all(bind=engine)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+logger = logging.getLogger(__name__)
 
-app = FastAPI()
+EMPTY_TWIML = '<?xml version="1.0" encoding="UTF-8"?><Response></Response>'
 
-# Inicializa o cliente Twilio
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    Base.metadata.create_all(bind=engine)
+    if not settings.allowed_numbers:
+        logger.warning("ALLOWED_NUMBERS vazio: o agente não responderá a ninguém.")
+    yield
+
+
+app = FastAPI(title="WhatsApp Agent", lifespan=lifespan)
 twilio_client = Client(settings.TWILIO_ACCOUNT_SID, settings.TWILIO_AUTH_TOKEN)
 
-@app.get("/")
-def read_root():
-    return {"Status": "Active", "Version": "3.0 (Active Sender)"}
 
-@app.post("/whatsapp")
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
+
+@app.post("/whatsapp", dependencies=[Depends(verify_twilio_signature)])
 async def reply_whatsapp(
     Body: Annotated[str, Form()],
     From: Annotated[str, Form()],
     ProfileName: Annotated[str, Form()] = "Usuário",
-    db: Session = Depends(get_db)
 ):
-    print(f"📩 Recebido de {ProfileName}: {Body}")
+    if not is_authorized(From):
+        # Não responde nem revela que o número existe; só registra de forma mascarada.
+        logger.warning("Mensagem ignorada de número não autorizado: %s", mask_number(From))
+        return Response(content=EMPTY_TWIML, media_type="application/xml")
 
-    # 1. Gera resposta (pode demorar alguns segundos)
-    ai_reply = get_groq_response(
-        message_body=Body,
-        profile_name=ProfileName,
-        phone_number=From  # 'From' é a variável que vem do Twilio (whatsapp:+55...)
-    )
-    # 2. Envio Ativo
+    logger.info("Mensagem recebida de %s", mask_number(From))
+
+    # Chamadas síncronas (Groq, SQLAlchemy) fora do event loop
     try:
-        msg = twilio_client.messages.create(
-            from_=settings.TWILIO_PHONE_NUMBER,
-            body=ai_reply,
-            to=From
+        ai_reply = await run_in_threadpool(
+            get_groq_response, message_body=Body, profile_name=ProfileName, phone_number=From
         )
-        print(f"✅ Enviado via Twilio API. SID: {msg.sid}")
-    except Exception as e:
-        print(f"❌ Erro ao enviar pro Twilio: {e}")
+    except Exception:
+        logger.exception("Falha ao gerar resposta")
+        ai_reply = FALLBACK_REPLY
 
-    return "OK"
+    try:
+        msg = await run_in_threadpool(
+            twilio_client.messages.create, from_=settings.TWILIO_PHONE_NUMBER, body=ai_reply, to=From
+        )
+        logger.info("Resposta enviada (SID %s)", msg.sid)
+    except Exception:
+        logger.exception("Falha ao enviar mensagem pela Twilio")
+
+    return Response(content=EMPTY_TWIML, media_type="application/xml")
