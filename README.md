@@ -1,6 +1,12 @@
-# Agente de WhatsApp com IA para Personal Trainers
+# Agente de WhatsApp com IA (tool calling)
 
-Agente conversacional no WhatsApp que responde perguntas do personal trainer consultando **dados reais** da base do [PTRoster](https://github.com/Noronha18/PTRoster), como a lista de alunos e o último pagamento de cada um. O modelo da Groq (Llama 3.3 70B) decide sozinho quando chamar uma ferramenta (*tool calling*) e redige a resposta a partir do resultado, sem inventar dados.
+Base reutilizável de agente conversacional no WhatsApp que responde consultando **dados reais** de um sistema por meio de *tool calling*. O modelo da Groq (Llama 3.3 70B) decide sozinho quando chamar uma ferramenta e redige a resposta a partir do resultado, sem inventar dados.
+
+A infraestrutura (webhook seguro, memória de conversa, orquestração da IA e envio pela Twilio) não depende do negócio. **Para outro domínio, troque as ferramentas e o prompt.**
+
+### Implementação de referência: personal trainers
+
+Este repositório vem configurado para o [PTRoster](https://github.com/Noronha18/PTRoster): o personal pergunta pelo WhatsApp e o agente consulta alunos e pagamentos na base do sistema.
 
 ```
 Personal: "A Ana já pagou este mês?"
@@ -31,7 +37,7 @@ WhatsApp ──► Twilio ──► POST /whatsapp (FastAPI)
 4. Se o modelo pedir uma ferramenta, a consulta roda na base do PTRoster e o resultado volta ao modelo, que escreve a resposta final.
 5. A resposta é enviada pela API REST da Twilio e salva no histórico.
 
-### Ferramentas do modelo
+### Ferramentas da implementação de referência
 
 | Tool | O que faz |
 |---|---|
@@ -40,9 +46,37 @@ WhatsApp ──► Twilio ──► POST /whatsapp (FastAPI)
 
 ---
 
+## Adaptando para outros usos
+
+O que é específico do domínio fica em três lugares:
+
+| O que trocar | Onde | Exemplo |
+|---|---|---|
+| **Ferramentas:** as funções que buscam ou alteram dados | `app/services/tools_service.py` | `consultar_pedido`, `entregas_do_dia`, `prazos_da_semana` |
+| **Contrato das ferramentas:** nome, descrição e parâmetros que o modelo enxerga | `TOOLS` e `AVAILABLE_FUNCTIONS` em `app/services/ai_service.py` | `"Retorna as entregas agendadas para uma data"` |
+| **Prompt de sistema:** papel, tom e limites | `SYSTEM_PROMPT` em `app/services/ai_service.py` | `"Você é o assistente da distribuidora..."` |
+
+O webhook, a validação da Twilio, o histórico de conversa, o tratamento de erros e o envio de mensagens não mudam.
+
+**Exemplos de uso:**
+
+- **Gestão interna:** o dono de um negócio consulta entregas, estoque ou recebimentos pelo WhatsApp.
+- **Escritório ou consultório:** a equipe pergunta prazos, agenda e andamento de casos.
+- **Atendimento ao cliente:** status de pedido, horários, agendamento.
+
+### Modelo de acesso: escolha conforme quem conversa com o agente
+
+| Cenário | Como proteger |
+|---|---|
+| **Uso interno** (dono, equipe) | A allowlist atual (`ALLOWED_NUMBERS`) basta: quem está nela pode consultar tudo que as ferramentas expõem. |
+| **Uso pelo público** (clientes) | Troque a allowlist por **escopo por remetente**: cada ferramenta recebe o número de quem enviou **pelo código**, nunca por um argumento gerado pelo modelo, e filtra a consulta por ele. Assim um cliente não consegue ver dados de outro, nem por *prompt injection*. |
+| **Ações que alteram dados** (cancelar, registrar) | Peça confirmação explícita do usuário antes de executar, e registre quem pediu. |
+
+---
+
 ## Segurança
 
-O agente expõe dados financeiros de pessoas reais, então o acesso é fechado por padrão:
+O agente expõe dados reais (na implementação de referência, dados financeiros de alunos), então o acesso é fechado por padrão:
 
 - **Allowlist de números:** só os números em `ALLOWED_NUMBERS` recebem resposta. As mensagens de outros números são ignoradas em silêncio, sem chamar a IA nem revelar que o agente existe.
 - **Assinatura da Twilio:** toda requisição ao webhook precisa de um `X-Twilio-Signature` válido, calculado com o Auth Token. Requisições forjadas recebem `403`.
@@ -133,6 +167,7 @@ Os testes cobrem assinatura ausente ou inválida, número não autorizado, fluxo
 
 ## Próximos passos
 
+- Registro de ferramentas por domínio, para trocar de negócio só por configuração
 - Fila assíncrona para o processamento (a Twilio espera resposta do webhook em até 15 s)
 - Mais ferramentas: frequência do aluno e saldo de aulas de pacote
 - Deploy com HTTPS fixo no lugar do ngrok
